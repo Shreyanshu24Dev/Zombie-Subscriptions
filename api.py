@@ -97,6 +97,16 @@ def detect_dark_pattern(request: DarkPatternRequest):
     return detect_flow(request.steps)
 
 
+@app.get("/")
+def root():
+    """Friendly landing response so visiting the bare URL isn't confusing."""
+    return {
+        "message": "Zombie Subscription Detector API is running.",
+        "try_this": "/docs",
+        "health_check": "/health",
+    }
+
+
 @app.get("/health")
 def health():
     """Basic liveness check -- hitting this confirms the API is up."""

@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from detector import detect_subscriptions
+from dark_pattern_detector import detect_flow
 
 app = FastAPI(
     title="Zombie Subscription Detector API",
@@ -81,6 +82,19 @@ def _run_detection(raw_transactions: List[dict]) -> DetectionResponse:
         total_estimated_annual_cost=total,
         transactions_scanned=len(parsed),
     )
+
+
+class DarkPatternRequest(BaseModel):
+    steps: List[str]  # one string per screen in the cancellation flow, in order
+
+
+@app.post("/detect/dark-pattern")
+def detect_dark_pattern(request: DarkPatternRequest):
+    """Send the text of each screen in a cancellation flow, in order.
+    Returns a risk score and which manipulative tactics were detected."""
+    if not request.steps:
+        raise HTTPException(status_code=400, detail="Provide at least one step of flow text")
+    return detect_flow(request.steps)
 
 
 @app.get("/health")

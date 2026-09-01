@@ -20,49 +20,129 @@ import re
 # Patterns are intentionally broad/illustrative -- tune them as you
 # encounter real examples.
 TAXONOMY = {
+
     "confirmshaming": {
+
         "description": "Guilt-tripping language aimed at discouraging cancellation.",
+
         "patterns": [
+
             r"are you sure you want to (cancel|leave|give up)",
+
             r"you('| )?ll (lose|miss out on)",
+
             r"we('| )?ll miss you",
+
             r"don'?t want to (save money|keep your (benefits|discount))",
+
+            r"no thanks,? i (don'?t|do not) want",
+
+            r"i'?d rather (pay|lose|give up)",
+
         ],
+
     },
+
+
     "forced_continuity": {
+
         "description": "Trial/subscription auto-renews without a clear, timely warning.",
+
         "patterns": [
+
             r"automatically (renew|convert|continue)",
+
             r"unless you cancel",
+
             r"your (trial|subscription) will (convert|renew)",
+
+            r"your trial ends and (will )?(automatically )?renew",
+
+            r"you will be charged automatically",
+
+            r"your subscription continues until you cancel",
+
         ],
+
     },
+
+
     "roach_motel": {
+
         "description": "Cancellation requires extra hoops not required to sign up (calls, extra steps, mail).",
+
         "patterns": [
+
             r"call (us|customer service|\d)",
+
             r"contact (support|us) to cancel",
+
             r"speak (with|to) a representative",
+
             r"cancel(lation)? (by|via) (phone|mail)",
+
+            r"cancell?ation (is|can only be) (completed|processed) (by|through) (phone|support)",
+
+            r"you must (call|contact|speak to) (us|support|customer service)",
+
+            r"cancell?ation is not available online",
+
         ],
+
     },
+
+
     "hidden_information": {
+
         "description": "Fees, terms, or consequences buried or vaguely worded.",
+
         "patterns": [
+
             r"additional fees may apply",
+
             r"see terms for details",
+
             r"non-refundable",
+
+            r"terms and conditions apply",
+
+            r"fees may apply",
+
+            r"charges may apply",
+
         ],
+
     },
+
+
     "obstruction": {
+
         "description": "Interrupting the cancel flow with unrelated offers or extra confirmation screens.",
+
         "patterns": [
+
             r"before you go",
+
             r"wait[!,]",
+
             r"special offer",
+
             r"here('| )?s (a|an) (deal|discount) (just )?for you",
+
+            r"one more step",
+
+            r"before you cancel",
+
+            r"don'?t cancel yet",
+
+            r"stay with us",
+
+            r"keep your (plan|membership|subscription)",
+
         ],
+
     },
+
 }
 
 # A flow with this many steps or more gets flagged for friction, even

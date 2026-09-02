@@ -26,7 +26,7 @@ api_url = st.sidebar.text_input(
     "API base URL",
     value="http://127.0.0.1:8000",
     help="Running locally? Leave as-is. Deployed on Render? Paste that URL here instead.",
-).rstrip("/")
+).strip().rstrip("/")
 
 st.title("🧟 Zombie Subscription Detector")
 st.write(

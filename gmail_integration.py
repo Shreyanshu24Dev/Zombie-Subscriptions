@@ -18,20 +18,17 @@ from urllib.parse import urlencode
 import requests
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
-
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 # Read-only is deliberate -- this app never needs to send, delete, or
 # modify anything in the user's inbox.
 GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
 # Emails likely to mention a subscription or recurring charge.
 SEARCH_QUERY = 'subject:(receipt OR subscription OR invoice OR renewal OR payment OR "your trial")'
 
-AMOUNT_PATTERN = re.compile(
-    r"\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)"
-)
+AMOUNT_PATTERN = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)")
 
 
 def build_authorize_url(client_id: str, redirect_uri: str, state: str) -> str:

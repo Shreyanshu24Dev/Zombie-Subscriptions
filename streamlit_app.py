@@ -24,8 +24,8 @@ st.set_page_config(page_title="Zombie Subscription Detector", page_icon="🧟", 
 st.sidebar.header("Settings")
 api_url = st.sidebar.text_input(
     "API base URL",
-    value="http://127.0.0.1:8000",
-    help="Running locally? Leave as-is. Deployed on Render? Paste that URL here instead.",
+    value="https://zombie-subscriptions.onrender.com",
+    help="This is your deployed API. Only change this if testing locally (http://127.0.0.1:8000).",
 ).strip().rstrip("/")
 
 st.title("🧟 Zombie Subscription Detector")

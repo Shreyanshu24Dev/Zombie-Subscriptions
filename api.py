@@ -31,6 +31,8 @@ from gmail_integration import (
     build_authorize_url,
     exchange_code_for_token,
     fetch_subscription_transactions,
+    get_user_email,
+    send_email,
 )
 
 app = FastAPI(
@@ -163,6 +165,29 @@ def feedback_summary():
             if row.get("feedback") == "cancel":
                 cancelled.append(row["merchant"])
     return {"cancelled_merchants": cancelled, "num_cancelled": len(cancelled)}
+
+
+class CancellationNoticeRequest(BaseModel):
+    gmail_token: str
+    merchant: str
+    estimated_annual_cost: float
+
+
+@app.post("/gmail/notify-cancellation")
+def notify_cancellation(request: CancellationNoticeRequest):
+    """Emails the connected user a confirmation the moment they mark a
+    subscription for cancellation in the dashboard -- a receipt of their
+    own decision, sent to their own inbox."""
+    to_email = get_user_email(request.gmail_token)
+    body = (
+        f"You marked {request.merchant} for cancellation in Zombie Subscription Detector.\n\n"
+        f"Estimated savings if you follow through: ${request.estimated_annual_cost:,.2f}/year.\n\n"
+        f"Reminder: this app can't cancel the real charge for you -- log in to "
+        f"{request.merchant.split()[0].title()} or your card issuer to actually stop the payment.\n\n"
+        f"-- Zombie Subscription Detector"
+    )
+    send_email(request.gmail_token, to_email, f"Cancellation noted: {request.merchant}", body)
+    return {"sent": True, "to": to_email}
 
 
 @app.get("/gmail/authorize")

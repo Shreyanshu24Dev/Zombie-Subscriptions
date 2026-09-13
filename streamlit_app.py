@@ -167,6 +167,15 @@ if uploaded_file is not None or st.session_state.gmail_token:
                 if no_col.button("❌ No, cancel it", key=f"no_{state_key}", use_container_width=True):
                     st.session_state.feedback_state[state_key] = "cancel"
                     record_feedback(api_url, merchant, s["estimated_annual_cost"], "cancel")
+                    if st.session_state.gmail_token:
+                        try:
+                            requests.post(f"{api_url}/gmail/notify-cancellation", json={
+                                "gmail_token": st.session_state.gmail_token,
+                                "merchant": merchant,
+                                "estimated_annual_cost": s["estimated_annual_cost"],
+                            }, timeout=15)
+                        except requests.exceptions.RequestException:
+                            pass  # feedback is still recorded even if the email fails
                     st.rerun()
 
                 if answer == "still_using":

@@ -23,9 +23,12 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
-# Read-only is deliberate -- this integration never needs to send, delete,
-# or modify anything in the user's inbox.
-GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+# Read-only to scan for subscriptions, plus send -- needed to email a
+# cancellation confirmation. Still never deletes or modifies anything.
+GMAIL_SCOPE = (
+    "https://www.googleapis.com/auth/gmail.readonly "
+    "https://www.googleapis.com/auth/gmail.send"
+)
 
 # Emails likely to mention a subscription or recurring charge.
 SEARCH_QUERY = 'subject:(receipt OR subscription OR invoice OR renewal OR payment OR "your trial")'

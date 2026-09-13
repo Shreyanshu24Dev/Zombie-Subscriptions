@@ -11,16 +11,14 @@ Then open http://127.0.0.1:8000/docs -- FastAPI auto-generates an
 interactive test page there, so you can try it without writing a frontend.
 """
 
-import base64
 import csv
 import io
-import json
 import os
 import secrets
 from datetime import datetime
 from typing import List
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
@@ -166,41 +164,26 @@ def feedback_summary():
 
 
 @app.get("/gmail/authorize")
-def gmail_authorize(request: Request, return_to: str = None):
-    """STEP 1 of Gmail connect. If return_to is given (your dashboard's own
-    URL), it's carried through Google's round-trip via the state parameter,
-    so the callback can send the user back into your dashboard's normal
-    results UI -- the same feedback cards CSV uploads already use -- instead
-    of a disconnected standalone page."""
+def gmail_authorize(request: Request):
+    """STEP 1 of Gmail connect: sends the user to Google's own consent
+    screen. Nothing happens on our side yet except building the URL."""
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(
             status_code=500,
             detail="Gmail integration isn't configured yet -- GOOGLE_CLIENT_ID is missing.",
         )
     redirect_uri = f"{str(request.base_url).rstrip('/')}/gmail/callback"
-    state_payload = {"nonce": secrets.token_urlsafe(8), "return_to": return_to or ""}
-    state = base64.urlsafe_b64encode(json.dumps(state_payload).encode()).decode()
+    state = secrets.token_urlsafe(16)  # basic CSRF protection
     return RedirectResponse(build_authorize_url(GOOGLE_CLIENT_ID, redirect_uri, state))
 
 
 @app.get("/gmail/callback")
-def gmail_callback(request: Request, code: str = None, error: str = None, state: str = None):
-    """STEP 2 of Gmail connect. If a return_to was carried in state, redirect
-    there with the token attached so the dashboard can pick it up and run it
-    through the SAME detection + feedback-card flow as a CSV upload. Falls
-    back to a standalone results page only if no return_to was provided
-    (e.g. someone hits this URL directly, without going through a dashboard)."""
-    return_to = None
-    if state:
-        try:
-            payload = json.loads(base64.urlsafe_b64decode(state.encode()).decode())
-            return_to = payload.get("return_to") or None
-        except Exception:
-            return_to = None
-
+def gmail_callback(request: Request, code: str = None, error: str = None):
+    """STEP 2 of Gmail connect: Google redirects here after the user
+    approves (or denies) access. We exchange the code for a token, pull
+    matching emails, and render the results directly -- no separate
+    storage needed since this all happens in one request."""
     if error:
-        if return_to:
-            return RedirectResponse(f"{return_to}?gmail_error={error}")
         return HTMLResponse(
             f"<h3>Gmail connection was cancelled.</h3><p>({error})</p>"
             f"<p><a href='/gmail/authorize'>Try again</a></p>"
@@ -211,13 +194,6 @@ def gmail_callback(request: Request, code: str = None, error: str = None, state:
     redirect_uri = f"{str(request.base_url).rstrip('/')}/gmail/callback"
     access_token = exchange_code_for_token(code, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, redirect_uri)
 
-    if return_to:
-        # Hand the token back to the dashboard via URL param -- good enough
-        # for an MVP; a hardened version would use a short-lived server-side
-        # session instead of putting the token in a URL.
-        return RedirectResponse(f"{return_to}?gmail_token={access_token}")
-
-    # Fallback for testing the flow directly in a browser, without a dashboard.
     transactions = fetch_subscription_transactions(access_token)
     if not transactions:
         return HTMLResponse(
@@ -243,28 +219,6 @@ def gmail_callback(request: Request, code: str = None, error: str = None, state:
             </table>
         </body></html>
     """)
-
-
-@app.post("/detect/combined", response_model=DetectionResponse)
-async def detect_combined(file: UploadFile = File(None), gmail_token: str = Form(None)):
-    """Merges CSV-sourced and Gmail-sourced transactions into ONE detection
-    pass -- a subscription seen in both sources doesn't get double-counted,
-    it's just a bigger transaction list feeding the same clustering logic.
-    Either input alone still works fine on its own."""
-    all_raw = []
-
-    if file is not None:
-        contents = await file.read()
-        reader = csv.DictReader(io.StringIO(contents.decode("utf-8")))
-        all_raw.extend(list(reader))
-
-    if gmail_token:
-        all_raw.extend(fetch_subscription_transactions(gmail_token))
-
-    if not all_raw:
-        raise HTTPException(status_code=400, detail="Provide a CSV file, a Gmail token, or both")
-
-    return _run_detection(all_raw)
 
 
 @app.get("/")

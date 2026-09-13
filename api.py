@@ -167,27 +167,50 @@ def feedback_summary():
     return {"cancelled_merchants": cancelled, "num_cancelled": len(cancelled)}
 
 
-class CancellationNoticeRequest(BaseModel):
-    gmail_token: str
+class SubscriptionSummaryItem(BaseModel):
     merchant: str
     estimated_annual_cost: float
 
 
-@app.post("/gmail/notify-cancellation")
-def notify_cancellation(request: CancellationNoticeRequest):
-    """Emails the connected user a confirmation the moment they mark a
-    subscription for cancellation in the dashboard -- a receipt of their
-    own decision, sent to their own inbox."""
+class BatchNotifyRequest(BaseModel):
+    gmail_token: str
+    cancelled: List[SubscriptionSummaryItem] = []
+    kept: List[SubscriptionSummaryItem] = []
+
+
+@app.post("/gmail/notify-batch")
+def notify_batch(request: BatchNotifyRequest):
+    """Sends ONE email covering every decision made so far in this session --
+    whether the user cancelled one subscription or five, this fires once,
+    only when they click 'Send summary to Gmail'."""
+    if not request.cancelled and not request.kept:
+        raise HTTPException(status_code=400, detail="Nothing to summarize yet")
+
     to_email = get_user_email(request.gmail_token)
-    body = (
-        f"You marked {request.merchant} for cancellation in Zombie Subscription Detector.\n\n"
-        f"Estimated savings if you follow through: ${request.estimated_annual_cost:,.2f}/year.\n\n"
-        f"Reminder: this app can't cancel the real charge for you -- log in to "
-        f"{request.merchant.split()[0].title()} or your card issuer to actually stop the payment.\n\n"
-        f"-- Zombie Subscription Detector"
+    lines = ["Here's a summary of your subscription decisions:", ""]
+
+    if request.cancelled:
+        total_saved = sum(c.estimated_annual_cost for c in request.cancelled)
+        lines.append("Marked for cancellation:")
+        for c in request.cancelled:
+            lines.append(f"- {c.merchant}: ${c.estimated_annual_cost:,.2f}/year")
+        lines.append(f"Potential savings: ${total_saved:,.2f}/year")
+        lines.append("")
+
+    if request.kept:
+        lines.append("Kept active:")
+        for k in request.kept:
+            lines.append(f"- {k.merchant}: ${k.estimated_annual_cost:,.2f}/year")
+        lines.append("")
+
+    lines.append(
+        "Reminder: this app can't cancel real charges for you -- log in to each "
+        "merchant or your card issuer to actually stop payment on anything above."
     )
-    send_email(request.gmail_token, to_email, f"Cancellation noted: {request.merchant}", body)
-    return {"sent": True, "to": to_email}
+    lines.append("\n-- Zombie Subscription Detector")
+
+    send_email(request.gmail_token, to_email, "Your Subscription Decisions Summary", "\n".join(lines))
+    return {"sent": True, "to": to_email, "cancelled_count": len(request.cancelled), "kept_count": len(request.kept)}
 
 
 @app.get("/gmail/authorize")

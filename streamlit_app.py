@@ -167,15 +167,6 @@ if uploaded_file is not None or st.session_state.gmail_token:
                 if no_col.button("❌ No, cancel it", key=f"no_{state_key}", use_container_width=True):
                     st.session_state.feedback_state[state_key] = "cancel"
                     record_feedback(api_url, merchant, s["estimated_annual_cost"], "cancel")
-                    if st.session_state.gmail_token:
-                        try:
-                            requests.post(f"{api_url}/gmail/notify-cancellation", json={
-                                "gmail_token": st.session_state.gmail_token,
-                                "merchant": merchant,
-                                "estimated_annual_cost": s["estimated_annual_cost"],
-                            }, timeout=15)
-                        except requests.exceptions.RequestException:
-                            pass  # feedback is still recorded even if the email fails
                     st.rerun()
 
                 if answer == "still_using":
@@ -205,6 +196,10 @@ if uploaded_file is not None or st.session_state.gmail_token:
             s for i, s in enumerate(subs)
             if st.session_state.feedback_state.get(f"fb_{i}_{s['merchant']}") == "cancel"
         ]
+        kept = [
+            s for i, s in enumerate(subs)
+            if st.session_state.feedback_state.get(f"fb_{i}_{s['merchant']}") == "still_using"
+        ]
         if cancelled:
             st.divider()
             st.subheader("💰 Your potential savings")
@@ -224,5 +219,30 @@ if uploaded_file is not None or st.session_state.gmail_token:
             st.caption(
                 f"Marked for cancellation: {', '.join(s['merchant'] for s in cancelled)}."
             )
+
+        # --- One combined email, sent only when you're ready ---
+        if cancelled or kept:
+            st.divider()
+            if st.session_state.gmail_token:
+                if st.button("📧 Send summary to Gmail"):
+                    with st.spinner("Sending..."):
+                        try:
+                            r = requests.post(f"{api_url}/gmail/notify-batch", json={
+                                "gmail_token": st.session_state.gmail_token,
+                                "cancelled": [
+                                    {"merchant": s["merchant"], "estimated_annual_cost": s["estimated_annual_cost"]}
+                                    for s in cancelled
+                                ],
+                                "kept": [
+                                    {"merchant": s["merchant"], "estimated_annual_cost": s["estimated_annual_cost"]}
+                                    for s in kept
+                                ],
+                            }, timeout=30)
+                            r.raise_for_status()
+                            st.success(f"Sent one summary email to {r.json()['to']} ✅")
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Couldn't send the email: {e}")
+            else:
+                st.caption("Connect Gmail above to email yourself this summary.")
 else:
     st.caption("No file uploaded yet. Try the `transactions.csv` from Step 2 to see it in action.")

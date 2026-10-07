@@ -18,14 +18,19 @@ import json
 import os
 import secrets
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
 
-from detector import detect_subscriptions
+from detector import (
+    detect_subscriptions,
+    merge_transaction_files,
+    detect_recurring_multi_month,
+    CSVValidationError,
+)
 from dark_pattern_detector import detect_flow
 from gmail_integration import (
     build_authorize_url,
@@ -41,30 +46,22 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Allows a frontend running on a different origin (e.g. localhost:3000,
-# or your deployed dashboard's URL) to call this API from the browser.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten this to your real frontend's URL before going to production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Set these in your hosting platform's environment variables -- never
-# commit real credentials to the repo. See the Gmail setup guide for
-# where to get these from Google Cloud Console.
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 
-# Where "still using this?" responses get logged. Kept as a flat CSV (not a
-# database) on purpose -- this is a small MVP and a CSV is trivial to open,
-# inspect, or hand off to a notebook later.
 FEEDBACK_CSV_PATH = "feedback.csv"
 FEEDBACK_CSV_HEADER = ["timestamp", "merchant", "predicted_subscription", "feedback"]
 
 
 class Transaction(BaseModel):
-    date: str      # ISO format, e.g. "2026-03-14"
+    date: str
     merchant: str
     amount: float
 
@@ -86,7 +83,6 @@ class DetectionResponse(BaseModel):
 
 
 def _run_detection(raw_transactions: List[dict]) -> DetectionResponse:
-    """Shared logic for both endpoints below."""
     parsed = []
     for t in raw_transactions:
         try:
@@ -109,13 +105,11 @@ def _run_detection(raw_transactions: List[dict]) -> DetectionResponse:
 
 
 class DarkPatternRequest(BaseModel):
-    steps: List[str]  # one string per screen in the cancellation flow, in order
+    steps: List[str]
 
 
 @app.post("/detect/dark-pattern")
 def detect_dark_pattern(request: DarkPatternRequest):
-    """Send the text of each screen in a cancellation flow, in order.
-    Returns a risk score and which manipulative tactics were detected."""
     if not request.steps:
         raise HTTPException(status_code=400, detail="Provide at least one step of flow text")
     return detect_flow(request.steps)
@@ -124,16 +118,11 @@ def detect_dark_pattern(request: DarkPatternRequest):
 class FeedbackRequest(BaseModel):
     merchant: str
     estimated_annual_cost: float
-    feedback: str  # "still_using" or "cancel"
+    feedback: str
 
 
 @app.post("/feedback")
 def submit_feedback(request: FeedbackRequest):
-    """Records the user's answer to 'Still using this?' for one detected
-    subscription. Every row that reaches this endpoint was, by definition,
-    something the detector flagged as recurring -- so predicted_subscription
-    is always True here; the column is kept for consistency with any future
-    source (e.g. a human-labeled row) where that might not be the case."""
     if request.feedback not in ("still_using", "cancel"):
         raise HTTPException(status_code=400, detail="feedback must be 'still_using' or 'cancel'")
 
@@ -153,10 +142,6 @@ def submit_feedback(request: FeedbackRequest):
 
 @app.get("/feedback/summary")
 def feedback_summary():
-    """Rolls up every 'cancel' response logged so far -- how much money the
-    user has said goodbye to, and which merchants they flagged. Useful for
-    a dashboard-level 'total unlocked savings' number that survives page
-    refreshes (unlike Streamlit's in-memory session state)."""
     if not os.path.isfile(FEEDBACK_CSV_PATH):
         return {"cancelled_merchants": [], "num_cancelled": 0}
     cancelled = []
@@ -180,9 +165,6 @@ class BatchNotifyRequest(BaseModel):
 
 @app.post("/gmail/notify-batch")
 def notify_batch(request: BatchNotifyRequest):
-    """Sends ONE email covering every decision made so far in this session --
-    whether the user cancelled one subscription or five, this fires once,
-    only when they click 'Send summary to Gmail'."""
     if not request.cancelled and not request.kept:
         raise HTTPException(status_code=400, detail="Nothing to summarize yet")
 
@@ -215,11 +197,6 @@ def notify_batch(request: BatchNotifyRequest):
 
 @app.get("/gmail/authorize")
 def gmail_authorize(request: Request, return_to: str = None):
-    """STEP 1 of Gmail connect. If return_to is given (your dashboard's own
-    URL), it's carried through Google's round-trip via the state parameter,
-    so the callback can send the user back into your dashboard's normal
-    results UI -- the same feedback cards CSV uploads already use -- instead
-    of a disconnected standalone page."""
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(
             status_code=500,
@@ -233,11 +210,6 @@ def gmail_authorize(request: Request, return_to: str = None):
 
 @app.get("/gmail/callback")
 def gmail_callback(request: Request, code: str = None, error: str = None, state: str = None):
-    """STEP 2 of Gmail connect. If a return_to was carried in state, redirect
-    there with the token attached so the dashboard can pick it up and run it
-    through the SAME detection + feedback-card flow as a CSV upload. Falls
-    back to a standalone results page only if no return_to was provided
-    (e.g. someone hits this URL directly, without going through a dashboard)."""
     return_to = None
     if state:
         try:
@@ -260,12 +232,8 @@ def gmail_callback(request: Request, code: str = None, error: str = None, state:
     access_token = exchange_code_for_token(code, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, redirect_uri)
 
     if return_to:
-        # Hand the token back to the dashboard via URL param -- good enough
-        # for an MVP; a hardened version would use a short-lived server-side
-        # session instead of putting the token in a URL.
         return RedirectResponse(f"{return_to}?gmail_token={access_token}")
 
-    # Fallback for testing the flow directly in a browser, without a dashboard.
     transactions = fetch_subscription_transactions(access_token)
     if not transactions:
         return HTMLResponse(
@@ -295,10 +263,6 @@ def gmail_callback(request: Request, code: str = None, error: str = None, state:
 
 @app.post("/detect/combined", response_model=DetectionResponse)
 async def detect_combined(file: UploadFile = File(None), gmail_token: str = Form(None)):
-    """Merges CSV-sourced and Gmail-sourced transactions into ONE detection
-    pass -- a subscription seen in both sources doesn't get double-counted,
-    it's just a bigger transaction list feeding the same clustering logic.
-    Either input alone still works fine on its own."""
     all_raw = []
 
     if file is not None:
@@ -317,7 +281,6 @@ async def detect_combined(file: UploadFile = File(None), gmail_token: str = Form
 
 @app.get("/")
 def root():
-    """Friendly landing response so visiting the bare URL isn't confusing."""
     return {
         "message": "Zombie Subscription Detector API is running.",
         "try_this": "/docs",
@@ -327,22 +290,16 @@ def root():
 
 @app.get("/health")
 def health():
-    """Basic liveness check -- hitting this confirms the API is up."""
     return {"status": "ok"}
 
 
 @app.post("/detect", response_model=DetectionResponse)
 def detect_from_json(transactions: List[Transaction]):
-    """Send transactions directly as JSON. Good for when a frontend already
-    has the data (e.g. pulled live from Plaid) and just needs it analyzed."""
     return _run_detection([t.dict() for t in transactions])
 
 
 @app.post("/detect/upload-csv", response_model=DetectionResponse)
 async def detect_from_csv(file: UploadFile = File(...)):
-    """Upload a CSV with columns: date, merchant, amount.
-    This is the easiest way to test the API by hand -- e.g. with the
-    transactions.csv from Step 2."""
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a .csv file")
 
@@ -350,3 +307,50 @@ async def detect_from_csv(file: UploadFile = File(...)):
     reader = csv.DictReader(io.StringIO(contents.decode("utf-8")))
     rows = list(reader)
     return _run_detection(rows)
+
+
+class MultiMonthMerchantResult(BaseModel):
+    merchant: str
+    normalized_merchant: str
+    charge_count: int
+    avg_amount: float
+    avg_interval_days: Optional[float] = None
+    confidence: str  # "confirmed_recurring" | "insufficient_data" | "same_month_duplicate"
+
+
+class MultiMonthDetectionResponse(BaseModel):
+    merchants: List[MultiMonthMerchantResult]
+    transactions_scanned: int
+    warning: Optional[str] = None
+
+
+async def _read_csv_upload(upload_file: UploadFile) -> list:
+    if not upload_file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail=f"{upload_file.filename} is not a .csv file")
+    contents = await upload_file.read()
+    return list(csv.DictReader(io.StringIO(contents.decode("utf-8"))))
+
+
+@app.post("/detect/multi-month", response_model=MultiMonthDetectionResponse)
+async def detect_multi_month(file: UploadFile = File(...), file2: UploadFile = File(None)):
+    """Upload one CSV (required) and a second CSV covering a different
+    month (optional). With only one file, this behaves like a plain
+    recurrence scan of that file. With two, transactions are merged and
+    deduplicated first, which is what lets a subscription billed once a
+    month actually show up as 'confirmed_recurring' -- a single month's
+    data alone can never have two charges to compare."""
+    rows1 = await _read_csv_upload(file)
+    rows2 = await _read_csv_upload(file2) if file2 is not None else None
+
+    try:
+        merge_result = merge_transaction_files(rows1, rows2)
+    except CSVValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    merchants = detect_recurring_multi_month(merge_result["transactions"])
+
+    return MultiMonthDetectionResponse(
+        merchants=merchants,
+        transactions_scanned=len(merge_result["transactions"]),
+        warning=merge_result["warning"],
+    )

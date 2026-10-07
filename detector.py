@@ -27,7 +27,10 @@ def normalize_merchant(raw_name: str) -> str:
     'NETFLIX.COM' and 'NETFLIX  *MEMBER 4471' end up in the same bucket."""
     name = raw_name.upper()
     name = re.sub(r"[^A-Z ]", " ", name)  # drop digits/punctuation
-    boilerplate = r"\b(COM|INC|LLC|CO|USA|US|MEMBERSHIP|MEMBER|SUBSCRIBE|TRIP|ORDER|MKTPLACE)\b"
+    boilerplate = (
+        r"\b(COM|INC|LLC|CO|USA|US|MEMBERSHIP|MEMBER|SUBSCRIBE|TRIP|ORDER|"
+        r"MKTPLACE|BILL|BILLING|PAY|PAYMENT|RECUR|RECURRING)\b"
+    )
     name = re.sub(boilerplate, "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
@@ -130,6 +133,184 @@ def detect_subscriptions(transactions, today: date = None):
         })
 
     results.sort(key=lambda r: -r["estimated_annual_cost"])
+    return results
+
+
+class CSVValidationError(Exception):
+    """Raised when an uploaded CSV is missing a required column."""
+    pass
+
+
+REQUIRED_TRANSACTION_COLUMNS = {"date", "merchant", "amount"}
+
+# Multi-month detection has its own, separate tolerances from the
+# single-file detector above -- with only 2 data points (one charge per
+# month), there's no meaningful "variance" to measure the way the
+# single-file path does, so instead we check amounts and intervals
+# against fixed, explicit tolerances.
+MULTI_MONTH_MIN_CHARGES = 2
+MULTI_MONTH_AMOUNT_TOLERANCE_ABS = 2.0     # dollars
+MULTI_MONTH_AMOUNT_TOLERANCE_PCT = 0.05    # or 5%, whichever is more forgiving
+MULTI_MONTH_INTERVAL_MIN_DAYS = 27
+MULTI_MONTH_INTERVAL_MAX_DAYS = 33
+# An interval shorter than this means "twice in the same month," which is
+# a different signal than monthly recurrence (could be a split charge, a
+# refund+rebill, or coincidence) -- it should never count as confirming
+# monthly billing, even if the amounts match.
+SAME_MONTH_MAX_GAP_DAYS = 20
+
+
+def validate_transaction_columns(rows: list, label: str = "file") -> None:
+    """Raises CSVValidationError if the required columns aren't present.
+    Called before any merge/detection logic touches the data."""
+    if not rows:
+        raise CSVValidationError(f"{label} has no rows to read")
+    missing = REQUIRED_TRANSACTION_COLUMNS - set(rows[0].keys())
+    if missing:
+        raise CSVValidationError(
+            f"{label} is missing required column(s): {', '.join(sorted(missing))}"
+        )
+
+
+def _dedup_key(row: dict) -> tuple:
+    return (str(row["date"]), str(row["merchant"]), str(row["amount"]))
+
+
+def merge_transaction_files(file1_rows: list, file2_rows: list = None) -> dict:
+    """
+    Merges two CSVs' worth of transaction rows (each a dict with at least
+    date/merchant/amount keys) into one combined, deduplicated, sorted list.
+
+    file2_rows is optional -- passing None (or an empty list) makes this a
+    simple passthrough of file1_rows, so a caller can always go through this
+    function regardless of whether a second file was actually uploaded.
+
+    Returns {"transactions": [...], "warning": str | None}. The warning is
+    set (non-fatal) when both files cover the exact same date range, since
+    that adds no new signal for recurrence detection.
+    """
+    validate_transaction_columns(file1_rows, "first file")
+
+    if not file2_rows:
+        merged = sorted(file1_rows, key=lambda r: r["date"])
+        return {"transactions": merged, "warning": None}
+
+    validate_transaction_columns(file2_rows, "second file")
+
+    dates1 = [r["date"] for r in file1_rows]
+    dates2 = [r["date"] for r in file2_rows]
+    range1 = (min(dates1), max(dates1))
+    range2 = (min(dates2), max(dates2))
+
+    warning = None
+    if range1 == range2:
+        warning = (
+            f"Both files cover the exact same date range ({range1[0]} to "
+            f"{range1[1]}) -- the second file doesn't add any new months, "
+            f"so it won't improve detection."
+        )
+
+    seen = set()
+    merged = []
+    for row in file1_rows + file2_rows:
+        key = _dedup_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+
+    merged.sort(key=lambda r: r["date"])
+    return {"transactions": merged, "warning": warning}
+
+
+def detect_recurring_multi_month(transactions: list) -> list:
+    """
+    Runs recurrence detection across a (possibly multi-month) transaction
+    list. Unlike detect_subscriptions() above, this only requires 2+
+    charges (since two monthly files naturally produce exactly 2 charges
+    per subscription) and checks amount/interval against fixed tolerances
+    rather than relative statistical variance.
+
+    Returns one entry per merchant group, always -- including merchants
+    seen only once (confidence "insufficient_data") so the caller can show
+    the full picture, not just confirmed hits.
+    """
+    parsed = []
+    for t in transactions:
+        raw_date = t["date"]
+        parsed_date = (
+            datetime.fromisoformat(str(raw_date)).date()
+            if not isinstance(raw_date, date)
+            else raw_date
+        )
+        parsed.append({
+            "date": parsed_date,
+            "merchant": t["merchant"],
+            "amount": float(t["amount"]),
+        })
+
+    for t in parsed:
+        t["normalized"] = normalize_merchant(t["merchant"])
+    mapping = cluster_merchants({t["normalized"] for t in parsed})
+    for t in parsed:
+        t["group"] = mapping[t["normalized"]]
+
+    groups = {}
+    for t in parsed:
+        groups.setdefault(t["group"], []).append(t)
+
+    results = []
+    for group_name, charges in groups.items():
+        charges.sort(key=lambda c: c["date"])
+        count = len(charges)
+        avg_amount = round(statistics.mean(c["amount"] for c in charges), 2)
+        display_name = charges[-1]["merchant"]
+
+        if count < MULTI_MONTH_MIN_CHARGES:
+            results.append({
+                "merchant": display_name,
+                "normalized_merchant": group_name,
+                "charge_count": count,
+                "avg_amount": avg_amount,
+                "avg_interval_days": None,
+                "confidence": "insufficient_data",
+            })
+            continue
+
+        intervals = [(charges[i + 1]["date"] - charges[i]["date"]).days for i in range(count - 1)]
+        avg_interval = round(statistics.mean(intervals), 1)
+
+        amounts = [c["amount"] for c in charges]
+        amount_spread = max(amounts) - min(amounts)
+        amounts_consistent = (
+            amount_spread <= MULTI_MONTH_AMOUNT_TOLERANCE_ABS
+            or amount_spread <= MULTI_MONTH_AMOUNT_TOLERANCE_PCT * avg_amount
+        )
+
+        has_monthly_gap = any(
+            MULTI_MONTH_INTERVAL_MIN_DAYS <= iv <= MULTI_MONTH_INTERVAL_MAX_DAYS
+            for iv in intervals
+        )
+        has_same_month_gap = any(iv < SAME_MONTH_MAX_GAP_DAYS for iv in intervals)
+
+        if amounts_consistent and has_monthly_gap:
+            confidence = "confirmed_recurring"
+        elif has_same_month_gap and not has_monthly_gap:
+            confidence = "same_month_duplicate"
+        else:
+            confidence = "insufficient_data"
+
+        results.append({
+            "merchant": display_name,
+            "normalized_merchant": group_name,
+            "charge_count": count,
+            "avg_amount": avg_amount,
+            "avg_interval_days": avg_interval,
+            "confidence": confidence,
+        })
+
+    # confirmed first, then by how many charges back each one up
+    results.sort(key=lambda r: (r["confidence"] != "confirmed_recurring", -r["charge_count"]))
     return results
 
 

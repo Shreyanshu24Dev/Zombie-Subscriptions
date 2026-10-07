@@ -21,19 +21,13 @@ from urllib.parse import quote
 
 st.set_page_config(page_title="Zombie Subscription Detector", page_icon="🧟", layout="centered")
 
-# Tracks the user's "Still using this?" answer per merchant across reruns
-# (Streamlit reruns the whole script on every button click, so without
-# this the buttons would forget what was just clicked).
 if "feedback_state" not in st.session_state:
-    st.session_state.feedback_state = {}  # merchant -> "still_using" | "cancel"
+    st.session_state.feedback_state = {}
 if "gmail_token" not in st.session_state:
     st.session_state.gmail_token = None
 
 
 def record_feedback(api_url: str, merchant: str, estimated_annual_cost: float, feedback: str):
-    """Best-effort: log the answer to the API/feedback.csv. If the deployed
-    API predates this endpoint, or the network hiccups, we still keep the
-    answer locally in session_state so the UI doesn't break."""
     try:
         requests.post(
             f"{api_url}/feedback",
@@ -47,7 +41,6 @@ def record_feedback(api_url: str, merchant: str, estimated_annual_cost: float, f
     except requests.exceptions.RequestException:
         pass
 
-# ---- Sidebar: which API to talk to ----
 st.sidebar.header("Settings")
 api_url = st.sidebar.text_input(
     "API base URL",
@@ -62,7 +55,6 @@ dashboard_url = st.sidebar.text_input(
     help="Needed so Google knows where to redirect you back to after connecting Gmail.",
 ).strip().rstrip("/")
 
-# ---- Pick up the Gmail token Google redirected back with, if any ----
 query_params = st.query_params
 if "gmail_token" in query_params:
     st.session_state.gmail_token = query_params["gmail_token"]
@@ -78,7 +70,6 @@ st.write(
     "Both feed into the same results below."
 )
 
-# ---- Gmail connection status ----
 if st.session_state.gmail_token:
     col1, col2 = st.columns([4, 1])
     col1.success("✅ Gmail connected")
@@ -128,7 +119,6 @@ if uploaded_file is not None or st.session_state.gmail_token:
     if not subs:
         st.info("No recurring subscriptions detected in this file.")
     else:
-        # --- Top-line numbers ---
         col1, col2, col3 = st.columns(3)
         col1.metric("Subscriptions found", len(subs))
         col2.metric("Est. annual cost", f"${result['total_estimated_annual_cost']:,.2f}")
@@ -136,11 +126,9 @@ if uploaded_file is not None or st.session_state.gmail_token:
 
         st.divider()
 
-        # --- Chart ---
         chart_df = pd.DataFrame(subs)[["merchant", "estimated_annual_cost"]].set_index("merchant")
         st.bar_chart(chart_df, horizontal=True)
 
-        # --- Detail cards, each with a "still using it?" check-in ---
         st.subheader("Details")
         for i, s in enumerate(subs):
             merchant = s["merchant"]
@@ -191,7 +179,6 @@ if uploaded_file is not None or st.session_state.gmail_token:
                     )
                     st.table(compare_df.style.format("${:,.2f}"))
 
-        # --- Running savings summary across every "cancel" answer so far ---
         cancelled = [
             s for i, s in enumerate(subs)
             if st.session_state.feedback_state.get(f"fb_{i}_{s['merchant']}") == "cancel"
@@ -220,7 +207,6 @@ if uploaded_file is not None or st.session_state.gmail_token:
                 f"Marked for cancellation: {', '.join(s['merchant'] for s in cancelled)}."
             )
 
-        # --- One combined email, sent only when you're ready ---
         if cancelled or kept:
             st.divider()
             if st.session_state.gmail_token:
@@ -246,3 +232,71 @@ if uploaded_file is not None or st.session_state.gmail_token:
                 st.caption("Connect Gmail above to email yourself this summary.")
 else:
     st.caption("No file uploaded yet. Try the `transactions.csv` from Step 2 to see it in action.")
+
+
+# ============================================================================
+# Multi-month detection (optional, separate from the flow above)
+#
+# A single month's CSV has every merchant appearing once, so there's nothing
+# to compare against -- recurrence can't be confirmed from one data point.
+# This section lets you upload a second month to fix that. The second file
+# is entirely optional; uploading just the first still works.
+# ============================================================================
+st.divider()
+with st.expander("📊 Multi-month analysis (more accurate detection)"):
+    st.write(
+        "A single month's data can't confirm a subscription is recurring -- "
+        "every merchant only appears once. Upload a second CSV from a "
+        "different month and this will cross-check both together."
+    )
+
+    mm_col1, mm_col2 = st.columns(2)
+    mm_file1 = mm_col1.file_uploader("First month (required)", type="csv", key="mm_file1")
+    mm_file2 = mm_col2.file_uploader("Second month (optional)", type="csv", key="mm_file2")
+
+    if mm_file1 is not None:
+        if st.button("🔍 Analyze across months"):
+            with st.spinner("Comparing months..."):
+                try:
+                    files = {"file": (mm_file1.name, mm_file1.getvalue(), "text/csv")}
+                    if mm_file2 is not None:
+                        files["file2"] = (mm_file2.name, mm_file2.getvalue(), "text/csv")
+
+                    mm_response = requests.post(f"{api_url}/detect/multi-month", files=files, timeout=60)
+                    mm_response.raise_for_status()
+                    st.session_state.mm_result = mm_response.json()
+                except requests.exceptions.ConnectionError:
+                    st.error(f"Couldn't reach the API at {api_url}.")
+                    st.stop()
+                except requests.exceptions.RequestException as e:
+                    st.error(f"The API returned an error: {e}")
+                    st.stop()
+
+        mm_result = st.session_state.get("mm_result")
+        if mm_result:
+            if mm_result.get("warning"):
+                st.warning(mm_result["warning"])
+
+            st.caption(f"Scanned {mm_result['transactions_scanned']} transactions total.")
+
+            confidence_label = {
+                "confirmed_recurring": "✅ Confirmed recurring",
+                "same_month_duplicate": "⚠️ Charged twice same month (not monthly)",
+                "insufficient_data": "❔ Only seen once -- not enough data",
+            }
+
+            for m in mm_result["merchants"]:
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(f"**{m['merchant']}**")
+                    c1.caption(confidence_label.get(m["confidence"], m["confidence"]))
+                    c2.metric("Avg amount", f"${m['avg_amount']:,.2f}")
+                    if m["avg_interval_days"] is not None:
+                        st.caption(
+                            f"{m['charge_count']} charges seen, "
+                            f"~{m['avg_interval_days']} days apart"
+                        )
+                    else:
+                        st.caption(f"{m['charge_count']} charge seen")
+    else:
+        st.caption("Upload at least the first month's CSV to run this analysis.")

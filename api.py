@@ -319,7 +319,8 @@ class MultiMonthMerchantResult(BaseModel):
 
 
 class MultiMonthDetectionResponse(BaseModel):
-    merchants: List[MultiMonthMerchantResult]
+    merchants: List[MultiMonthMerchantResult]  # confirmed subscriptions ONLY
+    other_merchants_not_flagged: int = 0       # one-offs etc., counted but not listed
     transactions_scanned: int
     warning: Optional[str] = None
 
@@ -347,10 +348,16 @@ async def detect_multi_month(file: UploadFile = File(...), file2: UploadFile = F
     except CSVValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    merchants = detect_recurring_multi_month(merge_result["transactions"])
+    all_merchants = detect_recurring_multi_month(merge_result["transactions"])
+
+    # Only return actual subscriptions -- one-off purchases, merchants seen
+    # once, and same-month double charges are not subscriptions, so they
+    # stay out of the response (we just count them).
+    subscriptions = [m for m in all_merchants if m["confidence"] == "confirmed_recurring"]
 
     return MultiMonthDetectionResponse(
-        merchants=merchants,
+        merchants=subscriptions,
+        other_merchants_not_flagged=len(all_merchants) - len(subscriptions),
         transactions_scanned=len(merge_result["transactions"]),
         warning=merge_result["warning"],
     )

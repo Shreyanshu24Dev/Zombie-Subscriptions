@@ -149,8 +149,11 @@ REQUIRED_TRANSACTION_COLUMNS = {"date", "merchant", "amount"}
 # single-file path does, so instead we check amounts and intervals
 # against fixed, explicit tolerances.
 MULTI_MONTH_MIN_CHARGES = 2
-MULTI_MONTH_AMOUNT_TOLERANCE_ABS = 2.0     # dollars
-MULTI_MONTH_AMOUNT_TOLERANCE_PCT = 0.05    # or 5%, whichever is more forgiving
+# Percent-only on purpose. A flat-dollar allowance (e.g. "within $2") lets
+# every cheap purchase pass -- a $6.75 and a $7.10 coffee are 'close' in
+# dollars but 5% apart, while real subscriptions repeat the same amount
+# (or drift ~1-2% from currency conversion). 3% separates the two.
+MULTI_MONTH_AMOUNT_TOLERANCE_PCT = 0.03
 MULTI_MONTH_INTERVAL_MIN_DAYS = 27
 MULTI_MONTH_INTERVAL_MAX_DAYS = 33
 # An interval shorter than this means "twice in the same month," which is
@@ -282,23 +285,24 @@ def detect_recurring_multi_month(transactions: list) -> list:
 
         amounts = [c["amount"] for c in charges]
         amount_spread = max(amounts) - min(amounts)
-        amounts_consistent = (
-            amount_spread <= MULTI_MONTH_AMOUNT_TOLERANCE_ABS
-            or amount_spread <= MULTI_MONTH_AMOUNT_TOLERANCE_PCT * avg_amount
-        )
+        amounts_consistent = amount_spread <= MULTI_MONTH_AMOUNT_TOLERANCE_PCT * avg_amount
 
-        has_monthly_gap = any(
+        # EVERY gap between charges must look monthly -- not just one of them.
+        # A cafe you visit every few days can produce one 27-33 day gap by
+        # chance (last visit of month 1 -> first visit of month 2), but it
+        # will also produce lots of short gaps, which rules it out.
+        all_gaps_monthly = all(
             MULTI_MONTH_INTERVAL_MIN_DAYS <= iv <= MULTI_MONTH_INTERVAL_MAX_DAYS
             for iv in intervals
         )
         has_same_month_gap = any(iv < SAME_MONTH_MAX_GAP_DAYS for iv in intervals)
 
-        if amounts_consistent and has_monthly_gap:
+        if all_gaps_monthly and amounts_consistent:
             confidence = "confirmed_recurring"
-        elif has_same_month_gap and not has_monthly_gap:
-            confidence = "same_month_duplicate"
+        elif has_same_month_gap:
+            confidence = "same_month_duplicate"   # repeat visits, not a monthly bill
         else:
-            confidence = "insufficient_data"
+            confidence = "not_recurring"          # 2+ charges, but doesn't fit a monthly pattern
 
         results.append({
             "merchant": display_name,

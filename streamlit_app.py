@@ -277,26 +277,40 @@ with st.expander("📊 Multi-month analysis (more accurate detection)"):
             if mm_result.get("warning"):
                 st.warning(mm_result["warning"])
 
-            st.caption(f"Scanned {mm_result['transactions_scanned']} transactions total.")
+            subs_found = mm_result["merchants"]
+            hidden = mm_result.get("other_merchants_not_flagged", 0)
 
-            confidence_label = {
-                "confirmed_recurring": "✅ Confirmed recurring",
-                "same_month_duplicate": "⚠️ Charged twice same month (not monthly)",
-                "insufficient_data": "❔ Only seen once -- not enough data",
-            }
+            st.caption(
+                f"Scanned {mm_result['transactions_scanned']} transactions across both months."
+            )
 
-            for m in mm_result["merchants"]:
-                with st.container(border=True):
-                    c1, c2 = st.columns([3, 1])
-                    c1.markdown(f"**{m['merchant']}**")
-                    c1.caption(confidence_label.get(m["confidence"], m["confidence"]))
-                    c2.metric("Avg amount", f"${m['avg_amount']:,.2f}")
-                    if m["avg_interval_days"] is not None:
-                        st.caption(
-                            f"{m['charge_count']} charges seen, "
+            if not subs_found:
+                st.info(
+                    "No recurring subscriptions found. A subscription needs to appear in "
+                    "both months at a similar amount, roughly 30 days apart."
+                )
+            else:
+                m_col1, m_col2 = st.columns(2)
+                m_col1.metric("Subscriptions found", len(subs_found))
+                m_col2.metric(
+                    "Est. monthly total",
+                    f"${sum(m['avg_amount'] for m in subs_found):,.2f}",
+                )
+
+                for m in subs_found:
+                    with st.container(border=True):
+                        c1, c2 = st.columns([3, 1])
+                        c1.markdown(f"**{m['merchant']}**")
+                        c1.caption(
+                            f"✅ Seen {m['charge_count']} times, "
                             f"~{m['avg_interval_days']} days apart"
                         )
-                    else:
-                        st.caption(f"{m['charge_count']} charge seen")
+                        c2.metric("Per month", f"${m['avg_amount']:,.2f}")
+
+            if hidden:
+                st.caption(
+                    f"{hidden} other merchant(s) were left out because they aren't "
+                    f"recurring subscriptions (one-off purchases, or not on a monthly cycle)."
+                )
     else:
         st.caption("Upload at least the first month's CSV to run this analysis.")
